@@ -1,3 +1,4 @@
+# Copyright (c) 2017, Ronsor-OpenStar
 # Copyright (c) 2014, wowaname
 # All rights reserved.
 # 
@@ -24,7 +25,6 @@
 # The views and conclusions contained in the software and documentation are
 # those of the authors and should not be interpreted as representing official
 # policies, either expressed or implied, of the FreeBSD Project.
-
 import os.path
 
 class Main():
@@ -38,6 +38,7 @@ class Main():
 		self.VERSION = "alpha"
 
 		# defaults
+		self.MOTD = "prc.motd"
 		self.BOOTSTRAP = ""
 		self.CHANNELLEN = 64
 		self.LOCAL_BIND = []
@@ -53,10 +54,10 @@ class Main():
 
 			for line in lines:
 				line = line.split()
+				if len(line) >= 2: line[0] = line[0].upper()
 
 				if len(line) < 2:
 					pass
-
 				elif line[0] == "BOOTSTRAP":
 					self.BOOTSTRAP = str(" ".join(line[1:]))
 					self.logger.log_line("INFO", "config.py: BOOTSTRAP = %s" %
@@ -71,6 +72,8 @@ class Main():
 					self.HOSTNAME = str(line[1])
 					self.logger.log_line("INFO", "config.py: HOSTNAME = %s" %
 					 self.HOSTNAME)
+				elif line[0] == "MOTD":
+					self.MOTD = str(line[1])
 
 				elif line[0] in ("LOCAL_BIND", "REMOTE_BIND"):
 					if len(line) < 3:

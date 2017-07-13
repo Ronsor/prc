@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# Copyright (c) 2017, Ronsor-OpenStar
 # Copyright (c) 2014, wowaname
 # All rights reserved.
 # 
@@ -25,8 +26,16 @@
 # The views and conclusions contained in the software and documentation are
 # those of the authors and should not be interpreted as representing official
 # policies, either expressed or implied, of the FreeBSD Project.
+class ChannelUser ():
+	def __init__ (self, user):
+		self.user = user
+		self.status = 0
+	def set_status (self, num):
+		self.status = num
 
 class Channel ():
+	status_prefixes = [ str(), "+", "@" ]
+	status_modes = [ str(), "v", "o" ]
 	def __init__ (self, name, immutable = False):
 		self.name = name
 		self.members = []
@@ -34,16 +43,32 @@ class Channel ():
 		self.topic = ""
 		self.immutable = immutable
 		#self.logger.log_line("DEBUG", "channel %s created" % self.name)
-
+	def mode_to_status (self, mode):
+		return self.status_modes.index(mode)
+	def get_userbyname (self, name):
+		name = name.lower()
+		for member in self.members:
+			if member.user.nick.lower() == name:
+				return member
+		return None
+	def get_channeluser (self, user):
+		if user in self.members: return user
+		for member in self.members:
+			if member.user is user:
+				return member
+		return None
+	def set_status (self, user, num):
+		user = self.get_channeluser(user)
+		user.set_status(num)
 	def send (self, line, local, omit = None):
 		for member in self.members:
 		# first send to local users
-			if not member.local:
+			if not member.user.local:
 				continue
 			if member is omit:
 			# don't send privmsg/notice to oneself
 				continue
-			member.send(line)
+			member.user.send(line)
 
 		if not local:
 		# we don't need to send to remote users if this is a remote
@@ -53,60 +78,68 @@ class Channel ():
 		for client in self.unique.itervalues():
 		# then send to remote CONNECTIONS, not users, otherwise we get
 		# duplicate messages
-			client[0].send(line)
+			client[0].user.send(line)
 
+	def send_mode_change (self, user, string):
+		user = self.get_channeluser(user)
+		self.send(":%s MODE %s %s" % (user.user.full_hostmask() if user else "-server-", self.name, string), user.user.local if user else None, None)
 	def send_message (self, user, type, message):
-		self.send(":%s %s %s :%s" % (user.full_hostmask() if user else
+		user = self.get_channeluser(user)
+		self.send(":%s %s %s :%s" % (user.user.full_hostmask() if user else
 		 "-server-", type, self.name,
-		 message), user.local if user else None, user)
+		 message), user.user.local if user else None, user)
 
 	def send_names (self, user):
 		# TODO # should loop for long NAMES lists >512bytes
 		user.send_numeric(353, "= %s :%s" %
-		 (self.name, " ".join([member.nick for member in self.members])))
+		 (self.name, " ".join(["%s%s" % (self.status_prefixes[member.status], member.user.nick) for member in self.members])))
 		user.send_numeric(366, "%s :End of NAMES" % (self.name))
 
-	def join_user (self, user, local = None):
+	def join_user (self, raw_user, local = None, status = 0):
+		user = ChannelUser(raw_user)
 		self.members.append(user)
-		if not user.local:
-			if not user.sock in self.unique:
-				self.unique[user.sock] = []
-			self.unique[user.sock].append(user)
-		user.channels.append(self.name.lower())
-		self.send(":%s JOIN %s" % (user.full_hostmask(), self.name),
-		 user.local)
+		if not user.user.local:
+			if not user.user.sock in self.unique:
+				self.unique[user.user.sock] = []
+			self.unique[user.user.sock].append(user)
+		user.user.channels.append(self.name.lower())
+		self.send(":%s JOIN %s" % (user.user.full_hostmask(), self.name),
+		 user.user.local)
 		if not local:
 			for member in self.members:
 			# tell the (remote) joining user about all our local users
 				if not member.local:
 					continue
-				user.send(":%s JOIN %s" % (member.full_hostmask(), self.name))
+				user.send(":%s JOIN %s" % (member.user.full_hostmask(), self.name))
 			return
 		if self.topic:
 			local.send_numeric(332, "%s :%s" % (self.name, self.topic))
+		self.set_status(user, status)
 		self.send_names(local)
 
 	def quit_user (self, user):
-		if self.name.lower() not in user.channels: return
-		user.channels.remove(self.name.lower())
+		user = self.get_channeluser(user)
+		if self.name.lower() not in user.user.channels: return
+		user.user.channels.remove(self.name.lower())
 		# QUIT was already sent
 		self.members.remove(user)
-		if user.local:
+		if user.user.local:
 			return
-		self.unique[user.sock].remove(user)
-		if not self.unique[user.sock]:
-			del self.unique[user.sock]
+		self.unique[user.user.sock].remove(user)
+		if not self.unique[user.user.sock]:
+			del self.unique[user.user.sock]
 
 	def part_user (self, user, message = None):
-		self.send(":%s PART %s%s" % (user.full_hostmask(), self.name,
-			 " :" + message if message else ""), user.local)
+		user = self.get_channeluser(user)
+		self.send(":%s PART %s%s" % (user.user.full_hostmask(), self.name,
+			 " :" + message if message else ""), user.user.local)
 		self.quit_user(user)
 
 	def change_topic (self, user, message):
 		self.topic = message
-
-		self.send(":%s TOPIC %s :%s" % (user.full_hostmask(), self.name,
-			 self.topic), user.local)
+		user = self.get_channeluser(user)
+		self.send(":%s TOPIC %s :%s" % (user.user.full_hostmask(), self.name,
+			 self.topic), user.user.local)
 
 	#def __del__ (self):
 		#self.logger.log_line("DEBUG", "channel %s deleted" % self.name)

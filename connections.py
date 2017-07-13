@@ -25,13 +25,13 @@ nick_chars = (
 
 class LocalConnections ():
 	"""IRC to PRC interface"""
-	def __init__ (self, name, bind_addresses, olines, logger):
+	def __init__ (self, name, bind_addresses, olines, motdfile, logger):
 		self.name = name
 		self.olines = olines
 		self.logger = logger
 		self.connections = []
 		self.listeners = []
-
+		self.motdfile = motdfile
 		for bind_address in bind_addresses:
 			sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 			sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -75,11 +75,11 @@ class LocalConnections ():
 					if not u.local or u == connection.user:
 						continue
 					for c in connection.user.channels:
-						if u in channels[c].members:
+						if channels[c].get_channeluser(u) in channels[c].members:
 							found = True
 							break
 					if found:
-						connection.send(":%s QUIT :%s" %
+						u.send(":%s QUIT :%s" %
 						 (connection.user.full_hostmask(), e.message))
 
 				for u in servers:
@@ -105,6 +105,7 @@ class LocalConnections ():
 				 sock,
 				 address,
 				 self.olines,
+				 self.motdfile,
 				 self.logger) )
 			except socket.error:
 				pass # todo
@@ -236,7 +237,7 @@ class RemoteConnections ():
 
 class LocalConnection ():
 	# one nick per connection
-	def __init__ (self, name, socket, address, olines, logger):
+	def __init__ (self, name, socket, address, olines, motdfile, logger):
 		self.name = name
 		self.sock = socket
 		self.sock.setblocking(0)
@@ -245,7 +246,7 @@ class LocalConnection ():
 		self.data_in = ""
 		self.lastseen = time.time()
 		self.pinged = False
-
+		self.motdfile = motdfile
 		self.user = user.User(
 		 socket = self.sock,
 		 address = address,
@@ -285,6 +286,15 @@ class LocalConnection ():
 		for s in servers:
 			s.send(line)
 
+	def send_motd (self):
+		try:
+			with open(self.motdfile, "r") as f:
+				self.send_numeric(375, "- %s message of the day -" % (self.name))
+				for line in f:
+					self.send_numeric(372, "- %s" % (line))
+				self.send_numeric(376, "End of /MOTD reply")
+		except IOError:
+			self.send_numeric(422, "MOTD file missing")
 	def send_welcome (self):
 		"""send welcome banner on connect"""
 		self.send_numeric(001, ":Welcome to PRC!")
@@ -293,15 +303,17 @@ class LocalConnection ():
 		self.send_numeric(004, "%s PRC-Gateway-?? aBcsw abehiklmoptv" %
 		 (self.name))
 		self.send_numeric(005, "CASEMAPPING=rfc1459 CHANMODES=beI,k,l,imprstu "
-		 "CHANNELLEN=? CHANTYPES=&+ EXCEPTS=e INVEX=I "
+		 "CHANNELLEN=? CHANTYPES=#&+ EXCEPTS=e INVEX=I "
 		 ":are supported by this server")
 		self.send_numeric(005, "NETWORK=PRC NICKLEN=? PREFIX=(ov)@+ "
 		 ":are supported by this server")
+		self.send_motd()
 		self.broadcast_remote(":%s USER * * * :%s" %
 		 (self.user.full_hostmask(),
 		 self.user.gecos))
 		self.registered = 4
-
+	def on_motd (self, args):
+		self.send_motd()
 	def on_user (self, args):
 		"""USER command"""
 		if self.registered & 2:
@@ -390,7 +402,7 @@ class LocalConnection ():
 			return
 
 		if target in channels:
-			if self.user not in channels[target].members:
+			if channels[target].get_channeluser(self.user) == None:
 				if type == "PRIVMSG":
 					self.send_numeric(404, "%s :Cannot send to channel" %
 					 target)
@@ -449,6 +461,7 @@ class LocalConnection ():
 		"""JOIN command"""
 		targets = args[1].split(",")
 		for Target in targets:
+			newchan = False
 			if not Target:
 				continue
 			target = Target.lower()
@@ -461,18 +474,22 @@ class LocalConnection ():
 					 channels[i].immutable):
 						del channels[i]
 				continue
-			if target[0] not in "+&":
+			if target[0] not in "+&#":
 				self.send_numeric(403, "%s :No such channel" % Target)
 				continue
 			if not target in channels:
 				channels[target] = channel.Channel(Target)
-			if self.user in channels[target].members:
+				newchan = True
+			if channels[target].get_channeluser(self.user) in channels[target].members:
 				continue
 			if (target in ("&errors", "&eval", "&rawlog") and self.olines and
 			 not self.user.isoper):
 				self.send_numeric(471, "%s :Permission denied" % Target)
 				continue
-			channels[target].join_user(self.user, self)
+			if newchan:
+				channels[target].join_user(self.user, self, 2)
+			else:
+				channels[target].join_user(self.user, self)
 			self.broadcast_remote(":%s JOIN %s" %
 			 (self.user.full_hostmask(), target))
 
@@ -602,8 +619,51 @@ class LocalConnection ():
 		 (self.name, self.name, "PRC gateway"))
 		self.send_numeric(365, "%s :End of LINKS" %
 		 (args[1] if len(args) > 1 else "*"))
-
 	def on_mode (self, args):
+		if args[1].lower() == self.user.nick.lower() or args[1][0] == "+":
+			self.on_umode(args)
+			return
+		modes = args[2] if len(args) > 2 else ""
+		if modes == "": return
+		target = args[1].lower()
+		if not target in channels or target[0] == "+":
+			self.send_numeric(401, "%s :No such target" % target)
+			return
+		if not channels[target].get_channeluser(self.user):
+			self.send_numeric(404, "%s :Cannot send to channel" % target)
+			return
+		mode_param = 3
+		SET = True
+		UNSET = False
+		action = SET
+		mystatus = channels[target].get_channeluser(self.user).status
+		for mode in modes:
+			if mode == "+":
+				action = SET
+				continue
+			elif mode == "-":
+				action = UNSET
+				continue
+			if mode_param >= len(args):
+				return
+			if mode in "ov" and mystatus >= channels[target].mode_to_status(mode):
+				targetuser = args[mode_param]
+				mode_param += 1
+				if not channels[target].get_userbyname(targetuser): continue
+				targetuser = channels[target].get_userbyname(targetuser)
+				if action == SET:
+					if targetuser.status >= mystatus:
+						continue
+					channels[target].set_status(targetuser, channels[target].mode_to_status(mode))
+					channels[target].send_mode_change(self.user, "+%s %s" % (mode, targetuser.user.nick))
+					continue
+				elif action == UNSET and targetuser.status <= mystatus:
+					channels[target].set_status(targetuser, 0)
+					channels[target].send_mode_change(self.user, "-%s %s" % (mode, targetuser.user.nick))
+					continue
+			self.send_numeric(472, "%s :is an unknown mode to me" % mode)
+		return
+	def on_umode (self, args):
 		"""MODE command"""
 		target = args[1].lower()
 		modes = args[2] if len(args) > 2 else ""
@@ -693,6 +753,7 @@ class LocalConnection ():
 			("INVITE", 2, self.on_invite),
 			("JOIN", 1, self.on_join),
 			("PART", 1, self.on_part),
+			("MOTD", 0, self.on_motd, True),
 			("PING", 1, self.on_ping),
 			("QUIT", 0, self.on_quit, True),
 			("OPER", 2, self.on_oper),
@@ -889,7 +950,7 @@ class RemoteConnection ():
 			return
 
 		if target in channels:
-			if users[n.lower()] not in channels[target].members:
+			if channels[target].get_channeluser(users[n.lower()]) not in channels[target].members:
 				if type == "PRIVMSG":
 					#self.send_numeric(404, "%s :Cannot send to channel" %
 					# target)
@@ -955,7 +1016,7 @@ class RemoteConnection ():
 		if target not in channels:
 			channels[target] = channel.Channel(Target)
 
-		if users[n.lower()] not in channels[target].members:
+		if channels[target].get_channeluser(users[n.lower()]) not in channels[target].members:
 			channels[target].join_user(users[n.lower()])
 
 	def on_part (self, args, n, u, h):

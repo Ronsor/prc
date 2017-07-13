@@ -1,21 +1,11 @@
-# PRC configuration file
-# If the first word is not a defined variable name, the line is ignored.
-# Specify a config file at runtime with `python prc.py path/to/configfile`,
-# otherwise defaults to prc.conf
+LOG_LEVEL WARN
 
-# TODO support for multiple networks
-
-# port to connect your IRC client
-LOCAL_BIND 127.0.0.1 6777
-# port to allow connections from the PRC network
-REMOTE_BIND 0.0.0.0 16700
-# network name; arbitrary value that should be unique from other networks you're on
+LOCAL_BIND 0.0.0.0 6777
+REMOTE_BIND 127.0.0.1 16700
 NETWORK PRCnet
-# connect here if hostcache file not found
-BOOTSTRAP love.wowana.me 16700
-# nick length; should be uniform with the network
 NICKLEN 9
-# channel name length; should be uniform with the network
 CHANNELLEN 64
-
-LOG_LEVEL log.WARN
+HOSTNAME myservername.net
+BOOTSTRAP myuplink.net 16700
+OPERATOR oper pass
+MOTD prc.motd

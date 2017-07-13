@@ -14,6 +14,7 @@ class PRCGateway ():
 		 self.conf.NAME,
 		 self.conf.LOCAL_BIND,
 		 self.conf.OPERATOR,
+		 self.conf.MOTD,
 		 self.logger)
 		self.remote = connections.RemoteConnections(
 		 self.conf.NETWORK,
