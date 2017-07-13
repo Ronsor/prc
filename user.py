@@ -30,8 +30,9 @@ import log
 
 class User ():
 	def __init__ (self, socket, address, local, nick, ident, logger,
-	 gecos = ""):
+	 gecos = "", localconn = None):
 		self.sock = socket
+		self.localconn = localconn
 		self.address = address
 		self.local = local
 		self.nick = nick

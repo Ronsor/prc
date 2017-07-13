@@ -253,8 +253,9 @@ class LocalConnection ():
 		 local = True,
 		 nick = "*",
 		 ident = "*",
-		 logger = self.logger)
-
+		 logger = self.logger,
+		 localconn = self)
+		
 		self.registered = 0
 
 	def send (self, message):
@@ -265,7 +266,6 @@ class LocalConnection ():
 			self.logger.log_line("DEBUG", "sending data to a dead sock %s" %
 			 self.user.address[0])
 			self.sock.close()
-			raise socket.error, "Sending failed"
 
 	def send_numeric (self, numeric, message = None):
 		"""sends a numeric to the user"""
@@ -289,23 +289,23 @@ class LocalConnection ():
 	def send_motd (self):
 		try:
 			with open(self.motdfile, "r") as f:
-				self.send_numeric(375, "- %s message of the day -" % (self.name))
+				self.send_numeric(375, ":- %s message of the day -" % (self.name))
 				for line in f:
-					self.send_numeric(372, "- %s" % (line))
-				self.send_numeric(376, "End of /MOTD reply")
+					self.send_numeric(372, ":- %s" % (line))
+				self.send_numeric(376, ":End of /MOTD reply")
 		except IOError:
-			self.send_numeric(422, "MOTD file missing")
+			self.send_numeric(422, ":MOTD file missing")
 	def send_welcome (self):
 		"""send welcome banner on connect"""
 		self.send_numeric(001, ":Welcome to PRC!")
 		self.send_numeric(002, ":Your host is %s, running version "
-		 "PRC-Gateway-??" % (self.name))
-		self.send_numeric(004, "%s PRC-Gateway-?? aBcsw abehiklmoptv" %
+		 "prcd-v1" % (self.name))
+		self.send_numeric(004, "%s prcd-v1 aBcsw abehiklmoptv" %
 		 (self.name))
-		self.send_numeric(005, "CASEMAPPING=rfc1459 CHANMODES=beI,k,l,imprstu "
+		self.send_numeric(005, "CASEMAPPING=ASCII CHANMODES=beI,k,l,imprstu "
 		 "CHANNELLEN=? CHANTYPES=#&+ EXCEPTS=e INVEX=I "
 		 ":are supported by this server")
-		self.send_numeric(005, "NETWORK=PRC NICKLEN=? PREFIX=(ov)@+ "
+		self.send_numeric(005, "NETWORK=PRC NICKLEN=? PREFIX=(aohv)!@%+ "
 		 ":are supported by this server")
 		self.send_motd()
 		self.broadcast_remote(":%s USER * * * :%s" %
@@ -402,7 +402,7 @@ class LocalConnection ():
 			return
 
 		if target in channels:
-			if channels[target].get_channeluser(self.user) == None:
+			if channels[target].get_channeluser(self.user) == None or ("m" in channels[target].modeflags and channels[target].get_channeluser(self.user).status == 0):
 				if type == "PRIVMSG":
 					self.send_numeric(404, "%s :Cannot send to channel" %
 					 target)
@@ -430,11 +430,14 @@ class LocalConnection ():
 		"""TOPIC command"""
 		target = args[1].lower()
 
-		if target not in channels:
+		if target not in channels or channels[target].get_channeluser(self.user) == None:
 			self.send_numeric(403, "%s :No such channel" % target)
 			return
 
 		if len(args) > 2:
+			if ("t" in channels[target].modeflags and channels[target].get_channeluser(self.user).status < 2):
+				self.send_numeric(482, "%s :Mode +t set" % (target))
+				return
 			message = args[2]
 			channels[target].change_topic(self.user, message)
 			return
@@ -483,15 +486,16 @@ class LocalConnection ():
 			if channels[target].get_channeluser(self.user) in channels[target].members:
 				continue
 			if (target in ("&errors", "&eval", "&rawlog") and self.olines and
-			 not self.user.isoper):
+			 not self.user.isoper) or channels[target].is_really_banned(self.user) or ("i" in channels[target].modeflags and not channels[target].is_invex(self.user)):
 				self.send_numeric(471, "%s :Permission denied" % Target)
 				continue
-			if newchan:
-				channels[target].join_user(self.user, self, 2)
+			if newchan and target[0] != "+":
+				channels[target].join_user(self.user, self, -1)
 			else:
 				channels[target].join_user(self.user, self)
-			self.broadcast_remote(":%s JOIN %s" %
-			 (self.user.full_hostmask(), target))
+			if target[0] != "&":
+				self.broadcast_remote(":%s JOIN %s" %
+				 (self.user.full_hostmask(), target))
 
 	def on_part (self, args):
 		"""PART command"""
@@ -537,7 +541,14 @@ class LocalConnection ():
 		self.user.isoper = True
 		self.send_numeric(381, ":You are now an operator")
 		self.user.send(":%s MODE %s +o" % (self.name, self.user.nick))
-
+	def on_kill (self, args):
+		if self.olines and not self.user.isoper:
+			self.send_numeric(481, ":Permission denied")
+		else:
+			target = args[1].lower()
+			if target in users and users[target].local:
+				users[target].localconn.error("Killed by " + self.user.nick + ": " + args[2])
+		
 	def on_die (self, args):
 		"""DIE command; kills the server"""
 		if self.olines and not self.user.isoper:
@@ -561,14 +572,14 @@ class LocalConnection ():
 		for u in targets:
 			self.send_numeric(352, " ".join( (
 			 target,
-			 u.ident,
-			 u.address[0],
+			 u.user.ident,
+			 u.user.address[0],
 			 self.name,
-			 u.nick,
-			 ("G" if u.away else "H") +
-			 ("*" if u.isoper else ""),
-			 ":0" if u.local else ":1",
-			 u.gecos
+			 u.user.nick,
+			 ("G" if u.user.away else "H") +
+			 ("*" if u.user.isoper else ""),
+			 ":0" if u.user.local else ":1",
+			 u.user.gecos
 			 ) ))
 
 		self.send_numeric(315, "%s :End of WHO" % target)
@@ -644,15 +655,41 @@ class LocalConnection ():
 			elif mode == "-":
 				action = UNSET
 				continue
+			if mode in "ntmsi":
+				if action == SET:
+					if not mode in channels[target].modeflags:
+						channels[target].modeflags.add(mode)
+						channels[target].send_mode_change(self.user,"+%s" % (mode))
+				else:
+					if mode in channels[target].modeflags:
+						channels[target].modeflags.remove(mode)
+						channels[target].send_mode_change(self.user,"-%s" % (mode))
+				continue
+			if mode in "beI" and len(args) == 3:
+				for ban in channels[target].blist[mode]:
+					self.send_numeric(367, "%s %s" % (target, ban))
+				listType = { "I": "invite exception", "b": "ban", "e": "ban exception" }
+				self.send_numeric(368, "%s :End of %s list" % (target, listType[mode]))
+				continue
 			if mode_param >= len(args):
 				return
-			if mode in "ov" and mystatus >= channels[target].mode_to_status(mode):
+			if mode in "beI" and mystatus > 1:
+				targetmask = args[mode_param]
+				mode_param += 1
+				if (action == SET and not targetmask.lower() in channels[target].blist[mode]) or (action == UNSET and targetmask.lower() in channels[target].blist[mode]):
+					if action == SET:
+						channels[target].blist[mode].add(targetmask.lower())
+					else:
+						channels[target].blist[mode].remove(targetmask.lower())
+					channels[target].send_mode_change(self.user,"+%s %s" % (mode, targetmask.lower()))
+				continue
+			if mode in "aohv" and mystatus >= channels[target].mode_to_status(mode):
 				targetuser = args[mode_param]
 				mode_param += 1
 				if not channels[target].get_userbyname(targetuser): continue
 				targetuser = channels[target].get_userbyname(targetuser)
 				if action == SET:
-					if targetuser.status >= mystatus:
+					if targetuser.status >= channels[target].mode_to_status(mode):
 						continue
 					channels[target].set_status(targetuser, channels[target].mode_to_status(mode))
 					channels[target].send_mode_change(self.user, "+%s %s" % (mode, targetuser.user.nick))
@@ -663,6 +700,18 @@ class LocalConnection ():
 					continue
 			self.send_numeric(472, "%s :is an unknown mode to me" % mode)
 		return
+	def on_kick (self, args):
+		channel = args[1].lower()
+		target = args[2].lower()
+		message = args[3] if len(args) > 3 else "Kicked"
+		if not channel in channels or channel[0] == "+":
+			self.send_numeric(401, "%s :No such target" % channel)
+			return
+		if channels[channel].get_channeluser(self.user) == None or channels[channel].get_channeluser(self.user).status < 2 or channels[channel].get_userbyname(target) == None or channels[channel].get_userbyname(target).status > channels[channel].get_channeluser(self.user).status:
+			self.send_numeric(482, "%s :Operation not permitted" % (target))
+			return
+		channels[channel].kick_user(channels[channel].get_channeluser(self.user), channels[channel].get_userbyname(target), message)
+
 	def on_umode (self, args):
 		"""MODE command"""
 		target = args[1].lower()
@@ -756,6 +805,7 @@ class LocalConnection ():
 			("MOTD", 0, self.on_motd, True),
 			("PING", 1, self.on_ping),
 			("QUIT", 0, self.on_quit, True),
+			("KICK", 2, self.on_kick),
 			("OPER", 2, self.on_oper),
 			("DIE", 0, self.on_die),
 			("WHO", 1, self.on_who),
@@ -763,6 +813,7 @@ class LocalConnection ():
 			("NAMES", 1, self.on_names),
 			("LINKS", 0, self.on_links),
 			("MODE", 1, self.on_mode),
+			("KILL", 2, self.on_kill),
 			("PONG", 0, self.on_unimplemented, True),
 			("CAP", 0, self.on_unimplemented, True),
 		):
@@ -826,7 +877,6 @@ class RemoteConnection ():
 			self.logger.log_line("DEBUG", "sending data to a dead sock %s" %
 			 self.address[0])
 			self.sock.close()
-			raise socket.error, "Sending failed"
 
 	def send_numeric (self, numeric, message = None):
 		"""sends a numeric to the remote client"""
@@ -859,7 +909,6 @@ class RemoteConnection ():
 
 			self.address = (args[2], int(args[3]))
 			self.gecos = args[4]
-
 			for server in servers:
 				if server == self: continue
 				server.send("SERVER %s %s %d :%s" %
@@ -882,6 +931,53 @@ class RemoteConnection ():
 			 (u.full_hostmask(), u.gecos))
 
 	# :n!u@h USER * * * :gecos
+	def on_mode (self, args, n, u, h):
+		target = args[1]
+		if target[0] == "&":
+			channels["&errors"].send_message(None, "NOTICE", "Can't change modes of &local channels remotely")
+			self.error("Local channels are not shared")
+			return
+		Target = target
+		target = Target.lower()
+		if target not in channels:
+			return
+		modes = args[2]
+		param = args[3] if len(args) > 3 else ""
+		op = modes[0]
+		mode = modes[1]
+		if mode in "aohv" and len(param) > 0:
+			targetuser = channels[target].get_userbyname(param)
+			if targetuser == None: return
+			if op == "+" and targetuser.status >= channels[target].mode_to_status(mode): return
+			if op == "-" and targetuser.status == 0: return
+			channels[target].send_mode_change(users[n.lower()], "%s%s %s" % (op, mode, param))
+			if op == "+":
+				channels[target].set_status(targetuser, channels[target].mode_to_status(mode))
+			else:
+				channels[target].set_status(targetuser, 0)
+			return
+		if mode in "ntsim":
+			if op == "+" and mode in channels[target].modeflags: return
+			if op == "+": channels[target].modeflags.add(mode)
+			if op == "-" and not (mode in channels[target].modeflags): return
+			if op == "-": channels[target].modeflags.remove(mode)
+			channels[target].send_mode_change(users[n.lower()], "%s%s" % (op, mode))
+			return
+		if mode in "beI":
+			targetmask = param
+			SET = "+"
+			UNSET = "-"
+			action = op
+			print mode, target, targetmask
+			if (action == SET and not targetmask.lower() in channels[target].blist[mode]) or (action == UNSET and targetmask.lower() in channels[target].blist[mode]):
+				if action == SET:
+					channels[target].blist[mode].add(targetmask.lower())
+				else:
+					channels[target].blist[mode].remove(targetmask.lower())
+				channels[target].send_mode_change(users[n.lower()],"+%s %s" % (mode, targetmask.lower()))
+				
+
+
 	def on_user (self, args, N, U, H):
 		"""USER command that introduces users from the connection"""
 		n = N.lower()
@@ -957,12 +1053,6 @@ class RemoteConnection ():
 					return
 			channels[target].send_message(users[n.lower()], type, message)
 
-			if target == "&eval":
-				try:
-					channels["&eval"].send_message(None, "PRIVMSG",
-					 eval(message))
-				except BaseException as e:
-					channels["&eval"].send_message(None, "NOTICE", str(e))
 
 			return
 
@@ -1010,7 +1100,7 @@ class RemoteConnection ():
 		Target = args[1]
 		target = Target.lower()
 
-		if target[0] not in "+":
+		if target[0] not in "#+":
 			return
 
 		if target not in channels:
@@ -1026,7 +1116,11 @@ class RemoteConnection ():
 			return
 
 		channels[target].part_user(users[n.lower()])
-
+	def on_kick (self, args, n, u, h):
+		target = args[1].lower()
+		if not target in channels:
+			return
+		channels[target].kick_user(users[n.lower()], users[args[2].lower()], "Kicked")
 	def on_quit (self, args, n, u, h):
 		"""QUIT command"""
 		reason = args[1] if len(args) > 1 else "Exited"
@@ -1105,6 +1199,8 @@ class RemoteConnection ():
 			("JOIN", 1, self.on_join, True, False),
 			("PART", 1, self.on_part, True, False),
 			("QUIT", 0, self.on_quit, True, False),
+			("KICK", 2, self.on_kick, True, False),
+			("MODE", 2, self.on_mode, True, False),
 		):
 			if self.prc_callback(i[0], line, i[1], i[2], i[3], i[4]):
 				break
@@ -1127,3 +1223,4 @@ class RemoteConnection ():
 	def __del__ (self):
 		self.logger.log_line("DEBUG", "remote %s deleted" %
 		 (self.address[0] if self.address else "*"))
+

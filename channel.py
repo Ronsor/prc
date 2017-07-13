@@ -26,6 +26,7 @@
 # The views and conclusions contained in the software and documentation are
 # those of the authors and should not be interpreted as representing official
 # policies, either expressed or implied, of the FreeBSD Project.
+import fnmatch
 class ChannelUser ():
 	def __init__ (self, user):
 		self.user = user
@@ -34,14 +35,19 @@ class ChannelUser ():
 		self.status = num
 
 class Channel ():
-	status_prefixes = [ str(), "+", "@" ]
-	status_modes = [ str(), "v", "o" ]
+	status_prefixes = [ str(), "+", "%", "@", "!" ]
+	status_modes = [ str(), "v", "h", "o", "a" ]
 	def __init__ (self, name, immutable = False):
 		self.name = name
 		self.members = []
 		self.unique = {}
 		self.topic = ""
 		self.immutable = immutable
+		self.modeflags = set()
+		self.blist = {}
+		self.blist["I"] = set()
+		self.blist["b"] = set()
+		self.blist["e"] = set()
 		#self.logger.log_line("DEBUG", "channel %s created" % self.name)
 	def mode_to_status (self, mode):
 		return self.status_modes.index(mode)
@@ -57,8 +63,27 @@ class Channel ():
 			if member.user is user:
 				return member
 		return None
+	def is_banned (self, user):
+		for ban in self.blist["b"]:
+			if fnmatch.fnmatchcase(user.full_hostmask().lower(), ban.lower()):
+				return True
+		return False
+	def is_exception (self, user):
+		for ex in self.blist["e"]:
+			if fnmatch.fnmatchcase(user.full_hostmask().lower(), ex.lower()):
+				return True
+		return False
+	def is_really_banned (self, user):
+		return (self.is_banned(user) and (not self.is_exception(user)))
+	def is_invex (self, user):
+		for invex in self.blist["I"]:
+			if fnmatch.fnmatchcase(user.full_hostmask().lower(), invex.lower()):
+				return True
+		return False
+
 	def set_status (self, user, num):
 		user = self.get_channeluser(user)
+		if num == -1: num = len(self.status_prefixes) - 1
 		user.set_status(num)
 	def send (self, line, local, omit = None):
 		for member in self.members:
@@ -82,11 +107,11 @@ class Channel ():
 
 	def send_mode_change (self, user, string):
 		user = self.get_channeluser(user)
-		self.send(":%s MODE %s %s" % (user.user.full_hostmask() if user else "-server-", self.name, string), user.user.local if user else None, None)
+		self.send(":%s MODE %s %s" % (user.user.full_hostmask() if user else "-server-!server@server", self.name, string), user.user.local if user else None, None)
 	def send_message (self, user, type, message):
 		user = self.get_channeluser(user)
 		self.send(":%s %s %s :%s" % (user.user.full_hostmask() if user else
-		 "-server-", type, self.name,
+		 "-server-!server@server", type, self.name,
 		 message), user.user.local if user else None, user)
 
 	def send_names (self, user):
@@ -108,9 +133,16 @@ class Channel ():
 		if not local:
 			for member in self.members:
 			# tell the (remote) joining user about all our local users
-				if not member.local:
+				if not member.user.local:
 					continue
-				user.send(":%s JOIN %s" % (member.user.full_hostmask(), self.name))
+				user.user.send(":%s JOIN %s" % (member.user.full_hostmask(), self.name))
+				if member.status > 0:
+					user.user.send(":%s MODE %s +%s %s" % (member.user.full_hostmask(), self.name, self.status_modes[member.status], member.user.nick))
+			for mode in self.modeflags:
+				user.user.send(":%s MODE %s +%s" % (user.user.full_hostmask(), self.name, mode))
+			for type in self.blist:
+				for entry in self.blist[type]:
+					user.user.send(":%s MODE %s +%s %s" % (user.user.full_hostmask(), self.name, type, entry))
 			return
 		if self.topic:
 			local.send_numeric(332, "%s :%s" % (self.name, self.topic))
@@ -133,6 +165,12 @@ class Channel ():
 		user = self.get_channeluser(user)
 		self.send(":%s PART %s%s" % (user.user.full_hostmask(), self.name,
 			 " :" + message if message else ""), user.user.local)
+		self.quit_user(user)
+	def kick_user (self, source, user, message = None):
+		user = self.get_channeluser(user)
+		source = self.get_channeluser(source)
+		self.send(":%s KICK %s %s%s" % (source.user.full_hostmask(), self.name, user.user.nick,
+			 " :" + message if message else ""), source.user.local)
 		self.quit_user(user)
 
 	def change_topic (self, user, message):

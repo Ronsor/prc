@@ -67,11 +67,11 @@ class Main():
 					self.CHANNELLEN = int(line[1])
 					self.logger.log_line("INFO", "config.py: CHANNELLEN = %d" %
 					 self.CHANNELLEN)
-
 				elif line[0] == "HOSTNAME":
 					self.HOSTNAME = str(line[1])
 					self.logger.log_line("INFO", "config.py: HOSTNAME = %s" %
 					 self.HOSTNAME)
+					if self.NAME == "prc.gateway": self.NAME = self.HOSTNAME
 				elif line[0] == "MOTD":
 					self.MOTD = str(line[1])
 
